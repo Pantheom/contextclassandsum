@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+summarizer.db
+*.db
+venv/
+.env
+models/
+*.gguf

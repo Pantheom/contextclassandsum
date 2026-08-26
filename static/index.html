@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Summarizer / Classifier Debug UI</title>
+<style>
+/* ─── Tokens ────────────────────────────────────────────────────────── */
+:root {
+  --bg:         #0d1117;
+  --surface:    #161b22;
+  --surface2:   #21262d;
+  --border:     #30363d;
+  --text:       #c9d1d9;
+  --dim:        #8b949e;
+  --muted:      #484f58;
+  --green:      #3fb950;
+  --green-bg:   #1a3a20;
+  --red:        #f85149;
+  --red-bg:     #3d1c1c;
+  --amber:      #d29922;
+  --amber-bg:   #3a2a0a;
+  --blue:       #58a6ff;
+  --purple:     #bc8cff;
+  --mono:       'Cascadia Code','Fira Code','Consolas',monospace;
+  --sans:       system-ui,-apple-system,sans-serif;
+  --r:          6px;
+  --gap:        8px;
+}
+
+/* ─── Reset ─────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { height: 100%; }
+body {
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ─── Top bar ───────────────────────────────────────────────────────── */
+.top-bar {
+  position: sticky; top: 0; z-index: 50;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  padding: 8px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.top-bar h1 { font-size: 14px; font-weight: 600; color: var(--blue); white-space: nowrap; }
+.top-bar .sep { color: var(--muted); }
+.session-area { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.session-area label { color: var(--dim); font-size: 12px; }
+
+/* ─── Status badge ──────────────────────────────────────────────────── */
+.status-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 8px; border-radius: 20px; font-size: 11px; font-weight: 600;
+  background: var(--surface2); border: 1px solid var(--border);
+}
+.status-badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.status-badge.ready  { border-color: var(--green); color: var(--green); }
+.status-badge.ready  .dot { background: var(--green); }
+.status-badge.error  { border-color: var(--red);   color: var(--red);   }
+.status-badge.error  .dot { background: var(--red);   }
+.status-badge.loading { border-color: var(--amber); color: var(--amber); }
+.status-badge.loading .dot { background: var(--amber); animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+/* ─── Buttons ───────────────────────────────────────────────────────── */
+button {
+  padding: 5px 11px; border-radius: var(--r); border: 1px solid var(--border);
+  background: var(--surface2); color: var(--text);
+  font-size: 12px; font-family: var(--sans); cursor: pointer;
+  transition: background .15s, border-color .15s;
+  white-space: nowrap;
+}
+button:hover:not(:disabled) { background: #30363d; border-color: #6e7681; }
+button:disabled { opacity: .4; cursor: not-allowed; }
+button.primary  { background: #1f6feb; border-color: #388bfd; color: #fff; }
+button.primary:hover:not(:disabled) { background: #388bfd; }
+button.success  { background: var(--green-bg); border-color: var(--green); color: var(--green); }
+button.success:hover:not(:disabled) { background: #224a28; }
+button.danger   { background: var(--red-bg);   border-color: var(--red);   color: var(--red);   }
+button.warn     { background: var(--amber-bg); border-color: var(--amber); color: var(--amber); }
+button.sm       { padding: 3px 8px; font-size: 11px; }
+
+/* ─── Inputs ────────────────────────────────────────────────────────── */
+input[type=text], select, textarea {
+  padding: 5px 9px; border-radius: var(--r);
+  border: 1px solid var(--border); background: var(--surface2); color: var(--text);
+  font-size: 12px; font-family: var(--sans);
+  outline: none; transition: border-color .15s;
+}
+input[type=text]:focus, select:focus, textarea:focus { border-color: var(--blue); }
+input[type=text].wide { width: 280px; }
+select { cursor: pointer; }
+
+/* ─── Layout ────────────────────────────────────────────────────────── */
+.workspace {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--gap);
+  padding: var(--gap);
+}
+.full-row { padding: 0 var(--gap) var(--gap); }
+
+/* ─── Panel ─────────────────────────────────────────────────────────── */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+.panel-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+}
+.panel-header h2 { font-size: 12px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+.panel-body { padding: 10px 12px; }
+
+/* ─── Add-turn row ──────────────────────────────────────────────────── */
+.add-turn-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.add-turn-row input[type=text] { flex: 1; min-width: 160px; }
+
+/* ─── Gap indicator ─────────────────────────────────────────────────── */
+.gap-indicator {
+  margin-top: 8px; padding: 6px 10px;
+  background: var(--surface2); border-radius: var(--r); border: 1px solid var(--border);
+  font-size: 11px; display: flex; align-items: center; gap: 10px;
+}
+.gap-label { color: var(--dim); }
+.gap-count { font-weight: 700; font-size: 13px; }
+.gap-bar { flex: 1; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.gap-fill { height: 100%; border-radius: 3px; transition: width .3s, background .3s; }
+.gap-fill.low    { background: var(--green); }
+.gap-fill.mid    { background: var(--amber); }
+.gap-fill.high   { background: var(--red); }
+
+/* ─── Turns list ────────────────────────────────────────────────────── */
+.turns-list {
+  margin-top: 8px;
+  max-height: 340px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+}
+.turn-item {
+  display: grid;
+  grid-template-columns: 36px 72px 1fr auto;
+  gap: 6px; align-items: baseline;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.turn-item:last-child { border-bottom: none; }
+.turn-idx  { color: var(--muted); font-family: var(--mono); text-align: right; }
+.turn-role { font-weight: 600; font-family: var(--mono); font-size: 11px; }
+.turn-item.user .turn-role  { color: var(--blue); }
+.turn-item.asst .turn-role  { color: var(--green); }
+.turn-text { color: var(--text); word-break: break-word; }
+.turn-ts   { color: var(--muted); font-size: 10px; font-family: var(--mono); white-space: nowrap; }
+
+/* ─── Summary panel ─────────────────────────────────────────────────── */
+.summary-meta { display: flex; gap: 14px; font-size: 11px; color: var(--dim); flex-wrap: wrap; }
+.summary-meta strong { color: var(--text); }
+.summary-box {
+  margin-top: 8px;
+  padding: 10px;
+  background: var(--surface2); border: 1px solid var(--border); border-radius: var(--r);
+  font-family: var(--mono); font-size: 12px; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 260px; overflow-y: auto;
+  color: var(--text);
+  transition: box-shadow .4s;
+}
+.summary-box.changed { box-shadow: 0 0 0 2px var(--green); }
+.summary-box .empty  { color: var(--muted); font-style: italic; font-family: var(--sans); }
+.summary-actions { margin-top: 8px; display: flex; align-items: center; gap: 8px; }
+.feedback { font-size: 11px; color: var(--green); }
+
+/* ─── Classifier panel ──────────────────────────────────────────────── */
+.classify-input-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.classify-input-row input[type=text] { flex: 1; min-width: 200px; }
+.classify-result {
+  margin-top: 10px; padding: 10px 12px;
+  background: var(--surface2); border: 1px solid var(--border); border-radius: var(--r);
+}
+.verdict-row { display: flex; align-items: center; gap: 10px; font-size: 13px; flex-wrap: wrap; }
+.verdict-badge {
+  padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px;
+}
+.verdict-badge.yes { background: var(--red-bg);   color: var(--red);   border: 1px solid var(--red); }
+.verdict-badge.no  { background: var(--green-bg); color: var(--green); border: 1px solid var(--green); }
+.raw-output { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.raw-output code { color: var(--amber); background: var(--amber-bg); padding: 1px 5px; border-radius: 3px; }
+.context-block {
+  margin-top: 10px; padding: 10px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--r);
+  font-family: var(--mono); font-size: 12px; white-space: pre-wrap;
+  max-height: 220px; overflow-y: auto; line-height: 1.6;
+}
+.context-block .ctx-heading { color: var(--blue); font-weight: 700; }
+.no-context { color: var(--green); font-size: 12px; margin-top: 8px; }
+
+/* ─── Event log ─────────────────────────────────────────────────────── */
+.log-entries {
+  max-height: 180px; overflow-y: auto;
+  font-family: var(--mono); font-size: 11px;
+}
+.log-entry {
+  display: grid;
+  grid-template-columns: 72px 44px 1fr auto;
+  gap: 6px; align-items: baseline;
+  padding: 3px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.log-entry:last-child { border-bottom: none; }
+.log-ts  { color: var(--muted); }
+.log-method { font-weight: 700; }
+.log-method.GET  { color: var(--blue); }
+.log-method.POST { color: var(--purple); }
+.log-path { color: var(--dim); word-break: break-all; }
+.log-status { text-align: right; font-weight: 600; }
+.log-status.ok  { color: var(--green); }
+.log-status.err { color: var(--red); }
+.log-body { grid-column: 1 / -1; color: var(--muted); padding-left: 116px; word-break: break-all; }
+
+/* ─── Misc ──────────────────────────────────────────────────────────── */
+.empty-state { padding: 16px; text-align: center; color: var(--muted); font-size: 12px; }
+.row-gap { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.mt { margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════ TOP BAR ═══════════════════════════════ -->
+<header class="top-bar">
+  <h1>⬡ Debug UI</h1>
+  <span class="sep">|</span>
+  <button class="primary" id="btn-init">Initialize Services</button>
+  <span class="status-badge" id="status-badge">
+    <span class="dot"></span>
+    <span id="status-text">Not initialized</span>
+  </span>
+  <span class="sep">|</span>
+  <div class="session-area">
+    <label>Session:</label>
+    <input type="text" id="session-input" class="wide" placeholder="my-session-1">
+    <button id="btn-use-session">Use</button>
+    <select id="session-select" title="Existing sessions">
+      <option value="">— existing sessions —</option>
+    </select>
+  </div>
+  <span id="current-session-label" style="font-size:11px;color:var(--dim)"></span>
+</header>
+
+<!-- ════════════════════════ MAIN 2-COLUMN AREA ═══════════════════════════ -->
+<div class="workspace">
+
+  <!-- ── Left: Conversation ── -->
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Conversation</h2>
+      <button class="sm" id="btn-refresh-turns" title="Refresh turns">↻ Refresh</button>
+    </div>
+    <div class="panel-body">
+      <div class="add-turn-row">
+        <select id="turn-role">
+          <option value="user">user</option>
+          <option value="assistant">assistant</option>
+        </select>
+        <input type="text" id="turn-text" placeholder="Turn text…" autocomplete="off">
+        <button class="success" id="btn-add-turn">Add Turn</button>
+      </div>
+
+      <div class="gap-indicator" id="gap-indicator">
+        <span class="gap-label">Turns since last summary:</span>
+        <span class="gap-count" id="gap-count">—</span>
+        <span class="gap-label">/ 15</span>
+        <div class="gap-bar"><div class="gap-fill low" id="gap-fill" style="width:0%"></div></div>
+      </div>
+
+      <div class="turns-list" id="turns-list">
+        <div class="empty-state">No session selected.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Right: Summary ── -->
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Summary Inspector</h2>
+      <button class="sm" id="btn-refresh-summary" title="Refresh summary">↻ Refresh</button>
+    </div>
+    <div class="panel-body">
+      <div class="summary-meta" id="summary-meta">
+        <span>last_summarized_turn_index: <strong id="meta-last-idx">—</strong></span>
+        <span>updated: <strong id="meta-updated">—</strong></span>
+      </div>
+      <div class="summary-box" id="summary-box">
+        <span class="empty">No summary yet.</span>
+      </div>
+      <div class="summary-actions">
+        <button class="warn" id="btn-force-summarize">Force Summarize Now</button>
+        <span class="feedback" id="summarize-feedback"></span>
+      </div>
+    </div>
+  </section>
+
+</div><!-- /workspace -->
+
+<!-- ═══════════════════════ CLASSIFIER PANEL ══════════════════════════════ -->
+<div class="full-row">
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Classifier Testing</h2>
+    </div>
+    <div class="panel-body">
+      <div class="classify-input-row">
+        <input type="text" id="classify-prompt" placeholder="Enter a prompt to test the classifier…" autocomplete="off">
+        <button id="btn-classify-only">Classify Only</button>
+        <button id="btn-get-context">Get Full Context</button>
+        <button class="primary" id="btn-run-pipeline">Run + Add as Turn</button>
+      </div>
+
+      <div class="classify-result" id="classify-result" style="display:none">
+        <div class="verdict-row">
+          <span class="verdict-badge" id="verdict-badge">—</span>
+          <span class="raw-output">raw: <code id="raw-output-value">—</code></span>
+          <span id="pipeline-note" style="font-size:11px;color:var(--dim)"></span>
+        </div>
+        <div id="context-output"></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- ════════════════════════ EVENT LOG ════════════════════════════════════ -->
+<div class="full-row">
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Event Log</h2>
+      <button class="sm danger" id="btn-clear-log">Clear</button>
+    </div>
+    <div class="log-entries" id="log-entries">
+      <div class="empty-state">No events yet.</div>
+    </div>
+  </section>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   STATE
+═══════════════════════════════════════════════════════════════════ */
+let currentSession = null;
+let isReady        = false;
+let logEntries     = [];         // array of log objects, newest first
+let prevSummaryText = null;      // for change-detection highlight
+let latestTurnIndex = 0;
+let lastSummarizedIdx = 0;
+
+const THRESHOLD = 15;            // periodic summarization threshold (display only)
+
+/* ═══════════════════════════════════════════════════════════════════
+   UTILITY — timestamp
+═══════════════════════════════════════════════════════════════════ */
+function nowTs() {
+  return new Date().toLocaleTimeString('en-GB', { hour12: false });
+}
+
+function fmtTs(isoStr) {
+  if (!isoStr) return '—';
+  try {
+    const d = new Date(isoStr);
+    return d.toLocaleTimeString('en-GB', { hour12: false });
+  } catch { return isoStr; }
+}
+
+function truncate(str, n = 160) {
+  if (!str) return '';
+  const s = String(str);
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   API WRAPPER — logs every request to the event log panel
+═══════════════════════════════════════════════════════════════════ */
+async function api(method, path, body = null) {
+  const t0 = Date.now();
+  const opts = {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body:    body ? JSON.stringify(body) : undefined,
+  };
+  let status = '???';
+  let data   = null;
+  try {
+    const resp = await fetch(path, opts);
+    status = resp.status;
+    data   = await resp.json();
+    if (!resp.ok) throw new Error(data?.detail || resp.statusText);
+    addLog({ method, path, status, data, ms: Date.now() - t0, ok: true });
+    return data;
+  } catch (err) {
+    addLog({ method, path, status, data: data ?? { error: err.message }, ms: Date.now() - t0, ok: false });
+    throw err;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   EVENT LOG
+═══════════════════════════════════════════════════════════════════ */
+function addLog(entry) {
+  logEntries.unshift({ ts: nowTs(), ...entry });
+  if (logEntries.length > 200) logEntries.pop();
+  renderLog();
+}
+
+function renderLog() {
+  const el = document.getElementById('log-entries');
+  if (!logEntries.length) {
+    el.innerHTML = '<div class="empty-state">No events yet.</div>';
+    return;
+  }
+  el.innerHTML = logEntries.map(e => {
+    const statusClass = e.ok ? 'ok' : 'err';
+    const bodyStr = truncate(JSON.stringify(e.data));
+    return `<div class="log-entry">
+      <span class="log-ts">${e.ts}</span>
+      <span class="log-method ${e.method}">${e.method}</span>
+      <span class="log-path">${e.path}</span>
+      <span class="log-status ${statusClass}">${e.status} (${e.ms}ms)</span>
+      <span class="log-body">${escHtml(bodyStr)}</span>
+    </div>`;
+  }).join('');
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   STATUS / INIT
+═══════════════════════════════════════════════════════════════════ */
+function setStatusBadge(state, text) {
+  const badge = document.getElementById('status-badge');
+  const label = document.getElementById('status-text');
+  badge.className = 'status-badge ' + state;
+  label.textContent = text;
+}
+
+async function initServices() {
+  setStatusBadge('loading', 'Loading models…');
+  document.getElementById('btn-init').disabled = true;
+  try {
+    const data = await api('POST', '/api/init');
+    if (data.status === 'ready') {
+      isReady = true;
+      setStatusBadge('ready', 'Ready');
+      setControlsEnabled(true);
+      await refreshSessions();
+    } else {
+      setStatusBadge('error', 'Error — see log');
+    }
+  } catch {
+    setStatusBadge('error', 'Init failed — see log');
+  } finally {
+    document.getElementById('btn-init').disabled = false;
+  }
+}
+
+function setControlsEnabled(enabled) {
+  const ids = [
+    'btn-add-turn','btn-force-summarize',
+    'btn-classify-only','btn-get-context','btn-run-pipeline',
+    'btn-use-session',
+  ];
+  ids.forEach(id => { document.getElementById(id).disabled = !enabled; });
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   SESSIONS
+═══════════════════════════════════════════════════════════════════ */
+async function refreshSessions() {
+  try {
+    const data = await api('GET', '/api/sessions');
+    const sel = document.getElementById('session-select');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">— existing sessions —</option>';
+    (data.sessions || []).forEach(sid => {
+      const opt = document.createElement('option');
+      opt.value = opt.textContent = sid;
+      sel.appendChild(opt);
+    });
+    if (prev) sel.value = prev;
+  } catch { /* non-critical */ }
+}
+
+function useSession(sid) {
+  sid = sid.trim();
+  if (!sid) return;
+  currentSession = sid;
+  document.getElementById('session-input').value = sid;
+  document.getElementById('current-session-label').textContent = `Active: ${sid}`;
+  refreshAll();
+}
+
+async function refreshAll() {
+  await Promise.all([refreshTurns(), refreshSummary()]);
+  await refreshSessions();
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   TURNS
+═══════════════════════════════════════════════════════════════════ */
+async function refreshTurns() {
+  if (!currentSession) return;
+  try {
+    const data = await api('GET', `/api/session/${encodeURIComponent(currentSession)}/turns`);
+    renderTurns(data.turns || []);
+  } catch { /* handled by log */ }
+}
+
+function renderTurns(turns) {
+  const el = document.getElementById('turns-list');
+  if (!turns.length) {
+    el.innerHTML = '<div class="empty-state">No turns yet.</div>';
+    latestTurnIndex = 0;
+    updateGapIndicator();
+    return;
+  }
+  latestTurnIndex = turns[turns.length - 1].turn_index;
+  el.innerHTML = turns.map(t => {
+    const roleClass = t.role === 'user' ? 'user' : 'asst';
+    const roleLabel = t.role === 'user' ? 'USER' : 'ASST';
+    return `<div class="turn-item ${roleClass}">
+      <span class="turn-idx">#${t.turn_index}</span>
+      <span class="turn-role">${roleLabel}</span>
+      <span class="turn-text">${escHtml(t.text)}</span>
+      <span class="turn-ts">${fmtTs(t.timestamp)}</span>
+    </div>`;
+  }).join('');
+  // Auto-scroll to bottom to show newest turn
+  el.scrollTop = el.scrollHeight;
+  updateGapIndicator();
+}
+
+async function addTurn() {
+  if (!currentSession) return alert('Select a session first.');
+  const role = document.getElementById('turn-role').value;
+  const text = document.getElementById('turn-text').value.trim();
+  if (!text) return;
+  try {
+    await api('POST', `/api/session/${encodeURIComponent(currentSession)}/turn`, { role, text });
+    document.getElementById('turn-text').value = '';
+    await refreshTurns();
+    // Delay summary refresh to allow periodic bg job to fire
+    setTimeout(refreshSummary, 800);
+    await refreshSessions();
+  } catch { /* logged */ }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   GAP INDICATOR
+═══════════════════════════════════════════════════════════════════ */
+function updateGapIndicator() {
+  const gap = Math.max(0, latestTurnIndex - lastSummarizedIdx);
+  const pct = Math.min(100, Math.round((gap / THRESHOLD) * 100));
+  document.getElementById('gap-count').textContent = gap;
+  const fill = document.getElementById('gap-fill');
+  fill.style.width = pct + '%';
+  fill.className = 'gap-fill ' + (pct < 55 ? 'low' : pct < 87 ? 'mid' : 'high');
+  document.getElementById('gap-count').style.color =
+    pct < 55 ? 'var(--green)' : pct < 87 ? 'var(--amber)' : 'var(--red)';
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   SUMMARY
+═══════════════════════════════════════════════════════════════════ */
+async function refreshSummary() {
+  if (!currentSession) return;
+  try {
+    const data = await api('GET', `/api/session/${encodeURIComponent(currentSession)}/summary`);
+    renderSummary(data);
+  } catch { /* logged */ }
+}
+
+function renderSummary(data) {
+  document.getElementById('meta-last-idx').textContent =
+    data.last_summarized_turn_index ?? '0';
+  document.getElementById('meta-updated').textContent =
+    fmtTs(data.updated_at);
+
+  lastSummarizedIdx = data.last_summarized_turn_index ?? 0;
+  updateGapIndicator();
+
+  const box = document.getElementById('summary-box');
+  const newText = data.current_summary || '';
+
+  if (newText) {
+    box.textContent = newText;
+  } else {
+    box.innerHTML = '<span class="empty">No summary yet.</span>';
+  }
+
+  // Flash highlight if text changed since last render
+  if (prevSummaryText !== null && newText !== prevSummaryText && newText) {
+    box.classList.remove('changed');
+    void box.offsetWidth;          // force reflow so animation restarts
+    box.classList.add('changed');
+    setTimeout(() => box.classList.remove('changed'), 2000);
+  }
+  prevSummaryText = newText;
+}
+
+async function forceSummarize() {
+  if (!currentSession) return alert('Select a session first.');
+  const btn = document.getElementById('btn-force-summarize');
+  const fb  = document.getElementById('summarize-feedback');
+  btn.disabled = true;
+  fb.textContent = '';
+  try {
+    const data = await api('POST', `/api/session/${encodeURIComponent(currentSession)}/summarize`);
+    fb.textContent = `Done — ${data.summary.length} chars`;
+    await refreshSummary();
+  } catch {
+    fb.textContent = 'Failed — see log';
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => { fb.textContent = ''; }, 4000);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   CLASSIFIER
+═══════════════════════════════════════════════════════════════════ */
+function prompt() {
+  return document.getElementById('classify-prompt').value.trim();
+}
+
+function showClassifyResult({ needs_context, raw_output, context, pipelineNote }) {
+  const panel = document.getElementById('classify-result');
+  panel.style.display = '';
+
+  const badge = document.getElementById('verdict-badge');
+  if (needs_context) {
+    badge.textContent = 'YES — needs context';
+    badge.className = 'verdict-badge yes';
+  } else {
+    badge.textContent = 'NO — self-contained';
+    badge.className = 'verdict-badge no';
+  }
+
+  const rawEl = document.getElementById('raw-output-value');
+  rawEl.textContent = raw_output !== undefined ? JSON.stringify(raw_output) : '(not available)';
+  rawEl.parentElement.style.display = raw_output !== undefined ? '' : 'none';
+
+  document.getElementById('pipeline-note').textContent = pipelineNote || '';
+
+  const ctxEl = document.getElementById('context-output');
+  if (context) {
+    // Colour ## headings differently
+    const formatted = escHtml(context)
+      .replace(/^(## .+)$/gm, '<span class="ctx-heading">$1</span>');
+    ctxEl.innerHTML = `<div class="context-block">${formatted}</div>`;
+  } else if (needs_context === false) {
+    ctxEl.innerHTML = '<p class="no-context">✓ No context needed — context block not fetched.</p>';
+  } else {
+    ctxEl.innerHTML = '';
+  }
+}
+
+async function classifyOnly() {
+  if (!currentSession) return alert('Select a session first.');
+  const p = prompt();
+  if (!p) return;
+  try {
+    const data = await api('POST',
+      `/api/session/${encodeURIComponent(currentSession)}/classify`,
+      { prompt: p }
+    );
+    showClassifyResult({ needs_context: data.needs_context, raw_output: data.raw_output });
+  } catch { /* logged */ }
+}
+
+async function getFullContext() {
+  if (!currentSession) return alert('Select a session first.');
+  const p = prompt();
+  if (!p) return;
+  try {
+    const data = await api('POST',
+      `/api/session/${encodeURIComponent(currentSession)}/get_context`,
+      { prompt: p }
+    );
+    showClassifyResult({
+      needs_context: data.needs_context,
+      raw_output: undefined,   // full pipeline doesn't expose raw output
+      context: data.context,
+    });
+    if (data.needs_context) await refreshSummary(); // summarize_on_demand may have run
+  } catch { /* logged */ }
+}
+
+async function runPipeline() {
+  if (!currentSession) return alert('Select a session first.');
+  const p = prompt();
+  if (!p) return;
+  const btn = document.getElementById('btn-run-pipeline');
+  btn.disabled = true;
+  try {
+    // 1. Get context (classify + optionally summarize)
+    const data = await api('POST',
+      `/api/session/${encodeURIComponent(currentSession)}/get_context`,
+      { prompt: p }
+    );
+    // 2. Add prompt as a user turn
+    const turnData = await api('POST',
+      `/api/session/${encodeURIComponent(currentSession)}/turn`,
+      { role: 'user', text: p }
+    );
+    document.getElementById('classify-prompt').value = '';
+    showClassifyResult({
+      needs_context: data.needs_context,
+      raw_output: undefined,
+      context: data.context,
+      pipelineNote: `Turn #${turnData.turn_index} added.`,
+    });
+    await refreshAll();
+  } catch { /* logged */ }
+  finally { btn.disabled = false; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   INIT — wire up all event handlers
+═══════════════════════════════════════════════════════════════════ */
+document.addEventListener('DOMContentLoaded', () => {
+  // Initially disable controls that require a session / ready models
+  setControlsEnabled(false);
+
+  document.getElementById('btn-init').addEventListener('click', initServices);
+
+  document.getElementById('btn-use-session').addEventListener('click', () =>
+    useSession(document.getElementById('session-input').value));
+
+  document.getElementById('session-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') useSession(e.target.value);
+  });
+
+  document.getElementById('session-select').addEventListener('change', e => {
+    if (e.target.value) useSession(e.target.value);
+  });
+
+  document.getElementById('btn-refresh-turns').addEventListener('click', refreshTurns);
+  document.getElementById('btn-refresh-summary').addEventListener('click', refreshSummary);
+
+  document.getElementById('btn-add-turn').addEventListener('click', addTurn);
+  document.getElementById('turn-text').addEventListener('keydown', e => {
+    if (e.key === 'Enter') addTurn();
+  });
+
+  document.getElementById('btn-force-summarize').addEventListener('click', forceSummarize);
+
+  document.getElementById('btn-classify-only').addEventListener('click', classifyOnly);
+  document.getElementById('btn-get-context').addEventListener('click', getFullContext);
+  document.getElementById('btn-run-pipeline').addEventListener('click', runPipeline);
+
+  document.getElementById('classify-prompt').addEventListener('keydown', e => {
+    if (e.key === 'Enter') classifyOnly();
+  });
+
+  document.getElementById('btn-clear-log').addEventListener('click', () => {
+    logEntries = [];
+    renderLog();
+  });
+
+  // Check if services are already initialized from a previous run
+  api('GET', '/api/status').then(data => {
+    if (data.ready) {
+      isReady = true;
+      setStatusBadge('ready', 'Ready');
+      setControlsEnabled(true);
+      refreshSessions();
+    }
+  }).catch(() => { /* first load, server may not have been initialized */ });
+});
+</script>
+</body>
+</html>
