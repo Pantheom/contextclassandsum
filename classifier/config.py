@@ -52,12 +52,13 @@ class ClassifierConfig:
     # ------------------------------------------------------------------ #
     history_turns: int = field(
         default_factory=lambda: int(
-            os.environ.get("CLASSIFIER_HISTORY_TURNS", "2")
+            os.environ.get("CLASSIFIER_HISTORY_TURNS", "6")
         )
     )
     """Number of prior turns fed to the classifier when building its prompt.
-    Using the last 2 turns gives enough recency signal for pronoun/reference
-    resolution without inflating the context window."""
+    Default 6 covers the last 2-3 query/answer pairs, giving the model enough
+    recency signal for pronoun/reference resolution without inflating the KV cache.
+    Override with CLASSIFIER_HISTORY_TURNS env var."""
 
     context_turns: int = field(
         default_factory=lambda: int(

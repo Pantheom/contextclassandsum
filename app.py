@@ -13,7 +13,8 @@ Design decisions:
 - No CORS middleware needed: index.html is served by this same process via
   StaticFiles, so all fetch() calls are same-origin.
 - No authentication: local single-user tool assumption.
-- All state lives in the existing SQLite DB. This app adds no new persistence.
+- All persistent state lives in Supabase (public.chat_history +
+  public.context_classifier). This app adds no new persistence.
 """
 
 from __future__ import annotations
@@ -38,9 +39,9 @@ import summarizer
 from summarizer import (
     write_turn,
     summarize_on_demand,
-    open_connection,
+    get_supabase_client,
     get_all_turns,
-    get_all_session_ids,
+    get_all_uids,
     cfg as summarizer_cfg,
 )
 from summarizer.db import get_session     # read-only helper, already exists
@@ -104,7 +105,7 @@ def api_init() -> Dict[str, str]:
     """
     _state["init_error"] = None
     try:
-        # 1. Init summarizer (logging + DB schema)
+        # 1. Init summarizer (logging + Supabase client)
         summarizer.init_service()
         _state["summarizer_ready"] = True
 
@@ -143,51 +144,43 @@ def api_status() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# /api/sessions
+# /api/sessions  — lists known uids (replaces the old session_id list)
 # ---------------------------------------------------------------------------
 @app.get("/api/sessions")
 def api_list_sessions() -> Dict[str, List[str]]:
-    """Return all known session IDs, newest first."""
-    import sqlite3 as _sqlite3
+    """Return all known user UIDs, newest first."""
     try:
-        conn = open_connection(summarizer_cfg.db_path)
-        try:
-            session_ids = get_all_session_ids(conn)
-        finally:
-            conn.close()
-        return {"sessions": session_ids}
-    except (_sqlite3.OperationalError, Exception):
+        client = get_supabase_client()
+        uids = get_all_uids(client)
+        return {"sessions": uids}
+    except Exception:
         return {"sessions": []}
 
 
 # ---------------------------------------------------------------------------
-# /api/session/{session_id}/turn
+# /api/session/{uid}/turn
 # ---------------------------------------------------------------------------
-@app.post("/api/session/{session_id}/turn")
-def api_add_turn(session_id: str, body: TurnBody) -> Dict[str, int]:
+@app.post("/api/session/{uid}/turn")
+def api_add_turn(uid: str, body: TurnBody) -> Dict[str, int]:
     if body.role not in ("user", "assistant"):
         raise HTTPException(
             status_code=422,
             detail="role must be 'user' or 'assistant'",
         )
-    turn_index = write_turn(session_id, body.role, body.text)
-    return {"turn_index": turn_index}
+    message_id = write_turn(uid, body.role, body.text)
+    return {"turn_index": message_id}
 
 
 # ---------------------------------------------------------------------------
-# /api/session/{session_id}/turns
+# /api/session/{uid}/turns
 # ---------------------------------------------------------------------------
-@app.get("/api/session/{session_id}/turns")
-def api_get_turns(session_id: str) -> Dict[str, List[Dict]]:
-    """Return all turns for the session in chronological order."""
-    import sqlite3 as _sqlite3
+@app.get("/api/session/{uid}/turns")
+def api_get_turns(uid: str) -> Dict[str, List[Dict]]:
+    """Return all turns for the uid in chronological order."""
     try:
-        conn = open_connection(summarizer_cfg.db_path)
-        try:
-            turns = get_all_turns(conn, session_id)
-        finally:
-            conn.close()
-    except (_sqlite3.OperationalError, Exception):
+        client = get_supabase_client()
+        turns = get_all_turns(client, uid)
+    except Exception:
         return {"turns": []}
     return {
         "turns": [
@@ -204,47 +197,43 @@ def api_get_turns(session_id: str) -> Dict[str, List[Dict]]:
 
 
 # ---------------------------------------------------------------------------
-# /api/session/{session_id}/summary
+# /api/session/{uid}/summary
 # ---------------------------------------------------------------------------
-@app.get("/api/session/{session_id}/summary")
-def api_get_summary(session_id: str) -> Dict[str, Any]:
-    """Return current_summary and last_summarized_turn_index directly from DB."""
-    import sqlite3 as _sqlite3
+@app.get("/api/session/{uid}/summary")
+def api_get_summary(uid: str) -> Dict[str, Any]:
+    """Return chat_summary and last_summarized_message_id from Supabase."""
     _empty = {"current_summary": None, "last_summarized_turn_index": 0, "updated_at": None}
     try:
-        conn = open_connection(summarizer_cfg.db_path)
-        try:
-            session = get_session(conn, session_id)
-        finally:
-            conn.close()
-    except (_sqlite3.OperationalError, Exception):
+        client = get_supabase_client()
+        session = get_session(client, uid)
+    except Exception:
         return _empty
     if session is None:
         return _empty
     return {
         "current_summary":            session.current_summary,
-        "last_summarized_turn_index": session.last_summarized_turn_index,
+        "last_summarized_turn_index": session.last_summarized_message_id,
         "updated_at":                 session.updated_at,
     }
 
 
 # ---------------------------------------------------------------------------
-# /api/session/{session_id}/summarize  (manual trigger)
+# /api/session/{uid}/summarize  (manual trigger)
 # ---------------------------------------------------------------------------
-@app.post("/api/session/{session_id}/summarize")
-def api_force_summarize(session_id: str) -> Dict[str, str]:
+@app.post("/api/session/{uid}/summarize")
+def api_force_summarize(uid: str) -> Dict[str, str]:
     """Directly call summarize_on_demand — bypasses the classifier entirely."""
-    summary = summarize_on_demand(session_id)
+    summary = summarize_on_demand(uid)
     return {"summary": summary}
 
 
 # ---------------------------------------------------------------------------
-# /api/session/{session_id}/classify  (debug: returns raw model output too)
+# /api/session/{uid}/classify  (debug: returns raw model output too)
 # ---------------------------------------------------------------------------
-@app.post("/api/session/{session_id}/classify")
-def api_classify(session_id: str, body: PromptBody) -> Dict[str, Any]:
+@app.post("/api/session/{uid}/classify")
+def api_classify(uid: str, body: PromptBody) -> Dict[str, Any]:
     """Run the classifier and return both the verdict and the raw model output."""
-    result = classify_debug(session_id, body.prompt)
+    result = classify_debug(uid, body.prompt)
     return {
         "needs_context": result["needs_context"],
         "raw_output":    result["raw_output"],
@@ -252,10 +241,10 @@ def api_classify(session_id: str, body: PromptBody) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# /api/session/{session_id}/get_context  (full pipeline)
+# /api/session/{uid}/get_context  (full pipeline)
 # ---------------------------------------------------------------------------
-@app.post("/api/session/{session_id}/get_context")
-def api_get_context(session_id: str, body: PromptBody) -> Dict[str, Any]:
+@app.post("/api/session/{uid}/get_context")
+def api_get_context(uid: str, body: PromptBody) -> Dict[str, Any]:
     """Full pipeline: classify -> optionally summarize_on_demand -> return context."""
-    result = get_response_context(session_id, body.prompt)
+    result = get_response_context(uid, body.prompt)
     return result

@@ -23,8 +23,8 @@ FROM python:3.11-slim
 
 # Install system build tools needed by llama-cpp-python's C++ compilation.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        cmake \
+    build-essential \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -48,10 +48,10 @@ EXPOSE 8000
 # the container unhealthy.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=120s --retries=3 \
     CMD python -c \
-        "import urllib.request, json, sys; \
-         r = urllib.request.urlopen('http://localhost:${PORT:-8000}/v1/health', timeout=4); \
-         d = json.loads(r.read()); \
-         sys.exit(0 if d.get('models_loaded') else 1)"
+    "import urllib.request, json, sys; \
+    r = urllib.request.urlopen('http://localhost:${PORT:-8000}/v1/health', timeout=4); \
+    d = json.loads(r.read()); \
+    sys.exit(0 if d.get('models_loaded') else 1)"
 
 # Use sh -c so ${PORT} is expanded at runtime from the container's env.
 CMD ["sh", "-c", "uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]

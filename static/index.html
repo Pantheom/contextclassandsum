@@ -248,11 +248,11 @@ select { cursor: pointer; }
   </span>
   <span class="sep">|</span>
   <div class="session-area">
-    <label>Session:</label>
-    <input type="text" id="session-input" class="wide" placeholder="my-session-1">
+    <label>User UID:</label>
+    <input type="text" id="session-input" class="wide" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
     <button id="btn-use-session">Use</button>
-    <select id="session-select" title="Existing sessions">
-      <option value="">— existing sessions —</option>
+    <select id="session-select" title="Existing UIDs">
+      <option value="">— existing users —</option>
     </select>
   </div>
   <span id="current-session-label" style="font-size:11px;color:var(--dim)"></span>
@@ -280,7 +280,7 @@ select { cursor: pointer; }
       <div class="gap-indicator" id="gap-indicator">
         <span class="gap-label">Turns since last summary:</span>
         <span class="gap-count" id="gap-count">—</span>
-        <span class="gap-label">/ 15</span>
+        <span class="gap-label">/ 10</span>
         <div class="gap-bar"><div class="gap-fill low" id="gap-fill" style="width:0%"></div></div>
       </div>
 
@@ -363,7 +363,7 @@ let prevSummaryText = null;      // for change-detection highlight
 let latestTurnIndex = 0;
 let lastSummarizedIdx = 0;
 
-const THRESHOLD = 15;            // periodic summarization threshold (display only)
+const THRESHOLD = 10;            // periodic summarization threshold (display only)
 
 /* ═══════════════════════════════════════════════════════════════════
    UTILITY — timestamp
