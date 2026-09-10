@@ -49,10 +49,11 @@ class _ModelSingleton:
             )
 
         logger.info(
-            "Loading model from %s  (n_ctx=%d, n_threads=%d, n_gpu_layers=0)",
+            "Loading model from %s  (n_ctx=%d, n_threads=%d, n_gpu_layers=%d)",
             model_path,
             cfg.n_ctx,
             cfg.n_threads,
+            cfg.n_gpu_layers,
         )
 
         # Import here so that tests can patch before the import resolves.
@@ -62,7 +63,7 @@ class _ModelSingleton:
             model_path=model_path,
             n_ctx=cfg.n_ctx,
             n_threads=cfg.n_threads,
-            n_gpu_layers=0,     # CPU-only — predictable RAM
+            n_gpu_layers=cfg.n_gpu_layers,
             verbose=False,      # Suppress llama.cpp startup chatter
         )
         self._inference_lock = threading.Lock()

@@ -39,6 +39,11 @@ class Config:
     )
     """Maximum tokens the model may emit per summary."""
 
+    n_gpu_layers: int = field(
+        default_factory=lambda: int(os.environ.get("SUMMARIZER_N_GPU_LAYERS", "-1"))
+    )
+    """Number of layers to offload to GPU VRAM (-1 for all layers, 0 for CPU only)."""
+
     # ------------------------------------------------------------------ #
     # Supabase                                                             #
     # ------------------------------------------------------------------ #

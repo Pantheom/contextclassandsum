@@ -47,6 +47,11 @@ class ClassifierConfig:
     Output is constrained to YES or NO (1 token each) via GBNF grammar;
     this is a safety ceiling for the grammar-unavailable fallback path."""
 
+    n_gpu_layers: int = field(
+        default_factory=lambda: int(os.environ.get("CLASSIFIER_N_GPU_LAYERS", "-1"))
+    )
+    """Number of layers to offload to GPU VRAM (-1 for all layers, 0 for CPU only)."""
+
     # ------------------------------------------------------------------ #
     # Behaviour                                                            #
     # ------------------------------------------------------------------ #
