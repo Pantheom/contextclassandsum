@@ -248,3 +248,42 @@ def api_get_context(uid: str, body: PromptBody) -> Dict[str, Any]:
     """Full pipeline: classify -> optionally summarize_on_demand -> return context."""
     result = get_response_context(uid, body.prompt)
     return result
+
+
+# ---------------------------------------------------------------------------
+# /api/session/{uid}/reset  (clear summary / advance pointer / wipe history)
+# ---------------------------------------------------------------------------
+@app.post("/api/session/{uid}/reset")
+def api_reset_session(uid: str, delete_history: bool = False) -> Dict[str, Any]:
+    """Clear session summary and advance pointer to prevent context overflows."""
+    client = get_supabase_client()
+    if delete_history:
+        client.table("chat_history").delete().eq("uid", uid).execute()
+        latest_id = 0
+    else:
+        h_resp = (
+            client.table("chat_history")
+            .select("id")
+            .eq("uid", uid)
+            .order("id", desc=True)
+            .limit(1)
+            .execute()
+        )
+        latest_id = h_resp.data[0]["id"] if h_resp.data else 0
+
+    client.table("context_classifier").upsert(
+        {
+            "uid": uid,
+            "chat_summary": "",
+            "last_summarized_message_id": latest_id,
+        },
+        on_conflict="uid",
+    ).execute()
+
+    return {
+        "status": "ok",
+        "uid": uid,
+        "last_summarized_message_id": latest_id,
+        "history_deleted": delete_history,
+    }
+
