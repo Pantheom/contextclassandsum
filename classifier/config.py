@@ -47,17 +47,23 @@ class ClassifierConfig:
     Output is constrained to YES or NO (1 token each) via GBNF grammar;
     this is a safety ceiling for the grammar-unavailable fallback path."""
 
+    n_gpu_layers: int = field(
+        default_factory=lambda: int(os.environ.get("CLASSIFIER_N_GPU_LAYERS", "-1"))
+    )
+    """Number of layers to offload to GPU VRAM (-1 for all layers, 0 for CPU only)."""
+
     # ------------------------------------------------------------------ #
     # Behaviour                                                            #
     # ------------------------------------------------------------------ #
     history_turns: int = field(
         default_factory=lambda: int(
-            os.environ.get("CLASSIFIER_HISTORY_TURNS", "2")
+            os.environ.get("CLASSIFIER_HISTORY_TURNS", "6")
         )
     )
     """Number of prior turns fed to the classifier when building its prompt.
-    Using the last 2 turns gives enough recency signal for pronoun/reference
-    resolution without inflating the context window."""
+    Default 6 covers the last 2-3 query/answer pairs, giving the model enough
+    recency signal for pronoun/reference resolution without inflating the KV cache.
+    Override with CLASSIFIER_HISTORY_TURNS env var."""
 
     context_turns: int = field(
         default_factory=lambda: int(

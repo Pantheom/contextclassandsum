@@ -231,3 +231,134 @@ FastAPI's interactive Swagger UI is available at **http://localhost:8000/docs**.
 app.py              FastAPI backend (thin wrapper over both packages)
 static/index.html   Single-page debug UI (vanilla HTML + JS, no build step)
 ```
+
+---
+
+## Production API (for backend integration)
+
+A separate, deployable FastAPI application at `api/` that exposes the
+summarizer and classifier packages as a clean JSON API.
+This is what your backend engineer calls — **not** the debug UI above.
+
+> **Auth note:** No authentication is currently required. Auth will be added
+> in a future revision. See `api/auth.py` for the implementation stub.
+
+---
+
+### Integration pattern — 2 calls per turn
+
+Every user turn requires two API calls:
+
+**Call 1 — when the user sends a message:**
+```
+POST /v1/process   { "session_id": "...", "prompt": "..." }
+```
+Returns `combined_prompt`. Send that directly to your own answering LLM.
+The user's turn is logged automatically — no separate logging call needed.
+
+**Call 2 — after your LLM generates its reply:**
+```
+POST /v1/sessions/{session_id}/reply   { "text": "..." }
+```
+Stores the assistant's reply so future `/v1/process` calls have complete history.
+
+---
+
+### Run locally
+
+```bash
+# 1. Set model paths (same env vars as the debug UI)
+$env:SUMMARIZER_MODEL_PATH = "C:\path\to\microsoft_Phi-4-mini-instruct-Q4_K_M.gguf"
+$env:CLASSIFIER_MODEL_PATH = "C:\path\to\google_gemma-3n-E2B-it-Q4_K_M.gguf"
+
+# 2. Start the production API (separate from the debug UI)
+uvicorn api.main:app --reload
+
+# Open http://localhost:8000/docs for the interactive API docs
+```
+
+The debug UI and the production API can run simultaneously on different ports:
+```bash
+uvicorn app:app     --port 8000 --reload   # debug UI
+uvicorn api.main:app --port 8001 --reload  # production API
+```
+
+---
+
+### curl examples
+
+**POST /v1/process**
+```bash
+curl -X POST http://localhost:8000/v1/process \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "user-42-conv-7",
+    "prompt": "What was the budget we agreed on last week?"
+  }'
+```
+Example response:
+```json
+{
+  "needs_context": true,
+  "context": "## Prior Context\nThe team discussed a $50k budget...\n\n## Recent Turns\n[Turn 3] USER: ...",
+  "combined_prompt": "## Prior Context\nThe team discussed a $50k budget...\n\n## Recent Turns\n[Turn 3] USER: ...\n\n---\n\nUser's current message: What was the budget we agreed on last week?",
+  "turn_index": 4
+}
+```
+
+**POST /v1/sessions/{session_id}/reply**
+```bash
+curl -X POST http://localhost:8000/v1/sessions/user-42-conv-7/reply \
+  -H "Content-Type: application/json" \
+  -d '{"text": "The agreed budget was $50,000, as confirmed in the kickoff."}'
+```
+Example response:
+```json
+{ "turn_index": 5 }
+```
+
+**GET /v1/health**
+```bash
+curl http://localhost:8000/v1/health
+```
+```json
+{ "status": "ok", "models_loaded": true }
+```
+
+---
+
+### Build and run via Docker
+
+```bash
+# Build
+docker build -t context-service:latest .
+
+# Run — mount models from host into container
+docker run -p 8000:8000 \
+  -v $(pwd)/models:/app/models \
+  -e SUMMARIZER_MODEL_PATH=/app/models/microsoft_Phi-4-mini-instruct-Q4_K_M.gguf \
+  -e CLASSIFIER_MODEL_PATH=/app/models/google_gemma-3n-E2B-it-Q4_K_M.gguf \
+  context-service:latest
+```
+
+After the container starts, poll `GET /v1/health` until `models_loaded` is
+`true` (model loading takes 30–90 s). The container's HEALTHCHECK does this
+automatically for orchestration platforms like ECS.
+
+---
+
+### Files added
+
+```
+api/
+├── __init__.py        Package marker
+├── config.py          PORT env var config
+├── auth.py            Auth stub (not yet implemented — see module docstring)
+├── models.py          Pydantic request/response models + build_combined_prompt
+├── errors.py          Global exception handlers (consistent JSON error shape)
+└── main.py            FastAPI application, startup model loading, 3 endpoints
+
+Dockerfile             Production image for api/ (debug UI excluded)
+tests/
+└── test_production_api.py   TestClient tests (models stubbed)
+```

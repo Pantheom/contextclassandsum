@@ -1,22 +1,27 @@
 """
 summarizer/db.py
 ----------------
-All SQLite access for the summarizer service.
+All Supabase (PostgreSQL) access for the summarizer service.
 
 Design rules:
-- Every public function accepts an open sqlite3.Connection; callers are
-  responsible for opening/closing connections.  This keeps transaction
-  control explicit and avoids hidden connection state.
-- WAL mode is enabled on init so concurrent readers don't block the writer.
-- All writes use parameterised queries — no string interpolation.
+- Every public function accepts a supabase.Client instance; callers are
+  responsible for creating the client (typically once at startup).  This keeps
+  connection control explicit and avoids hidden state.
+- All queries are keyed on uid (uuid) — session_id is present in the schema
+  but is treated as redundant and is never used for reads or writes.
+- The 10-message threshold is enforced by counting rows in chat_history for
+  the given uid where id > last_summarized_message_id.
 """
 
 from __future__ import annotations
 
-import sqlite3
+import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import List, Optional
+
+from supabase import Client, create_client
+
+from .config import cfg
 
 
 # ---------------------------------------------------------------------------
@@ -25,287 +30,262 @@ from typing import List, Optional
 
 @dataclass
 class SessionRow:
-    session_id: str
+    uid: str
     current_summary: Optional[str]
-    last_summarized_turn_index: int
+    last_summarized_message_id: int
     updated_at: Optional[str]
 
 
 @dataclass
 class TurnRow:
-    turn_id: int
-    session_id: str
-    turn_index: int
-    role: str           # 'user' | 'assistant'
-    text: str
-    timestamp: str
+    turn_id: int          # maps to chat_history.id
+    uid: str
+    role: str             # 'user' | 'assistant'
+    text: str             # maps to chat_history.message
+    timestamp: str        # maps to chat_history.created_at
+
+    # Shim attributes kept for backwards-compatibility with prompt.py /
+    # classifier/service.py that still reference turn_index / session_id.
+    # They are derived fields, not stored in Supabase.
+    turn_index: int = 0
+    session_id: str = ""
 
 
 # ---------------------------------------------------------------------------
-# Schema
+# Client factory
 # ---------------------------------------------------------------------------
 
-_SCHEMA_SQL = """
-PRAGMA journal_mode=WAL;
+def get_supabase_client() -> Client:
+    """Create and return a Supabase client using values from cfg.
 
-CREATE TABLE IF NOT EXISTS sessions (
-    session_id                  TEXT    PRIMARY KEY,
-    current_summary             TEXT,
-    last_summarized_turn_index  INTEGER NOT NULL DEFAULT 0,
-    updated_at                  TEXT
-);
-
-CREATE TABLE IF NOT EXISTS turns (
-    turn_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  TEXT    NOT NULL REFERENCES sessions(session_id),
-    turn_index  INTEGER NOT NULL,
-    role        TEXT    NOT NULL CHECK(role IN ('user', 'assistant')),
-    text        TEXT    NOT NULL,
-    timestamp   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    UNIQUE(session_id, turn_index)
-);
-
-CREATE INDEX IF NOT EXISTS idx_turns_session_index
-    ON turns(session_id, turn_index);
-"""
-
-
-def init_db(conn: sqlite3.Connection) -> None:
-    """Create tables and indexes if they do not already exist.
-
-    Safe to call on every startup — all statements are idempotent.
+    Raises:
+        RuntimeError: If SUPABASE_URL or SUPABASE_KEY are not configured.
     """
-    conn.executescript(_SCHEMA_SQL)
-    conn.commit()
+    if not cfg.supabase_url or not cfg.supabase_key:
+        raise RuntimeError(
+            "SUPABASE_URL and SUPABASE_KEY must be set in the environment "
+            "before the summarizer service can connect to Supabase."
+        )
+    return create_client(cfg.supabase_url, cfg.supabase_key)
 
 
 # ---------------------------------------------------------------------------
-# Connection factory
+# Session helpers  (maps to public.context_classifier)
 # ---------------------------------------------------------------------------
 
-def open_connection(db_path: str) -> sqlite3.Connection:
-    """Open a SQLite connection with sensible defaults.
-
-    - `check_same_thread=False` because the ThreadPoolExecutor background
-      worker runs on a different thread than the writer.  Each code path
-      that calls the DB must use its own connection (or hold the service-level
-      lock) — we do not share a single connection across threads.
-    - Row factory set to sqlite3.Row for named-column access.
-    """
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-# ---------------------------------------------------------------------------
-# Session helpers
-# ---------------------------------------------------------------------------
-
-def get_session(conn: sqlite3.Connection, session_id: str) -> Optional[SessionRow]:
-    """Return the session row, or None if it does not exist."""
-    row = conn.execute(
-        "SELECT session_id, current_summary, last_summarized_turn_index, updated_at "
-        "FROM sessions WHERE session_id = ?",
-        (session_id,),
-    ).fetchone()
-    if row is None:
+def get_session(client: Client, uid: str) -> Optional[SessionRow]:
+    """Return the context_classifier row for uid, or None if it doesn't exist."""
+    resp = (
+        client.table("context_classifier")
+        .select("uid, chat_summary, last_summarized_message_id, created_at")
+        .eq("uid", uid)
+        .maybe_single()
+        .execute()
+    )
+    if resp is None:
         return None
+    row = resp.data
     return SessionRow(
-        session_id=row["session_id"],
-        current_summary=row["current_summary"],
-        last_summarized_turn_index=row["last_summarized_turn_index"],
-        updated_at=row["updated_at"],
+        uid=row["uid"],
+        current_summary=row["chat_summary"],
+        last_summarized_message_id=row["last_summarized_message_id"],
+        updated_at=row["created_at"],
     )
 
 
-def get_or_create_session(conn: sqlite3.Connection, session_id: str) -> SessionRow:
-    """Return existing session or insert a fresh one with defaults."""
-    session = get_session(conn, session_id)
+def get_or_create_session(client: Client, uid: str) -> SessionRow:
+    """Return existing context_classifier row or upsert a fresh one."""
+    session = get_session(client, uid)
     if session is not None:
         return session
 
-    conn.execute(
-        "INSERT OR IGNORE INTO sessions "
-        "(session_id, current_summary, last_summarized_turn_index, updated_at) "
-        "VALUES (?, NULL, 0, ?)",
-        (session_id, _utcnow()),
-    )
-    conn.commit()
-    return get_session(conn, session_id)  # type: ignore[return-value]
+    client.table("context_classifier").upsert(
+        {
+            "uid": uid,
+            "chat_summary": None,
+            "last_summarized_message_id": 0,
+        },
+        on_conflict="uid",
+    ).execute()
+
+    return get_session(client, uid)  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
-# Turn helpers
+# Turn helpers  (maps to public.chat_history)
 # ---------------------------------------------------------------------------
 
-def insert_turn(
-    conn: sqlite3.Connection,
-    session_id: str,
-    role: str,
-    text: str,
-) -> int:
-    """Insert a new turn and return its monotonically increasing turn_index.
+# Dummy session_id constant used to satisfy the NOT NULL constraint on the
+# chat_history.session_id column.  The value is ignored by all query paths.
+_DUMMY_SESSION_ID = "00000000-0000-0000-0000-000000000000"
 
-    turn_index is computed as MAX(turn_index) + 1 for the session, atomically
-    within a transaction so concurrent inserts cannot collide.
+
+def insert_turn(client: Client, uid: str, role: str, text: str) -> int:
+    """Insert a new message into chat_history and return its auto-generated id.
+
+    Args:
+        client: Supabase client.
+        uid:    User UUID.
+        role:   'user' or 'assistant'.
+        text:   Message content.
+
+    Returns:
+        The bigint identity id assigned by the database.
     """
     if role not in ("user", "assistant"):
         raise ValueError(f"role must be 'user' or 'assistant', got {role!r}")
 
-    # Ensure session row exists before inserting the turn.
-    get_or_create_session(conn, session_id)
-
-    with conn:  # BEGIN / COMMIT / ROLLBACK on exit
-        row = conn.execute(
-            "SELECT COALESCE(MAX(turn_index), 0) AS max_idx "
-            "FROM turns WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
-        next_index: int = row["max_idx"] + 1
-
-        conn.execute(
-            "INSERT INTO turns (session_id, turn_index, role, text, timestamp) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (session_id, next_index, role, text, _utcnow()),
+    resp = (
+        client.table("chat_history")
+        .insert(
+            {
+                "uid": uid,
+                "session_id": _DUMMY_SESSION_ID,
+                "role": role,
+                "message": text,
+            }
         )
+        .execute()
+    )
+    return int(resp.data[0]["id"])
 
-    return next_index
+
+def get_latest_message_id(client: Client, uid: str) -> int:
+    """Return the highest chat_history.id for uid, or 0 if none."""
+    resp = (
+        client.table("chat_history")
+        .select("id")
+        .eq("uid", uid)
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        return 0
+    return int(resp.data[0]["id"])
 
 
-def get_latest_turn_index(conn: sqlite3.Connection, session_id: str) -> int:
-    """Return the highest turn_index for the session, or 0 if none."""
-    row = conn.execute(
-        "SELECT COALESCE(MAX(turn_index), 0) AS max_idx "
-        "FROM turns WHERE session_id = ?",
-        (session_id,),
-    ).fetchone()
-    return int(row["max_idx"])
+def count_unsummarized_turns(
+    client: Client,
+    uid: str,
+    last_summarized_message_id: int,
+) -> int:
+    """Count chat_history rows for uid where id > last_summarized_message_id.
+
+    This is the safe way to check the threshold: it counts actual rows for
+    this specific user, so a global identity jump caused by other users never
+    triggers a false positive.
+    """
+    resp = (
+        client.table("chat_history")
+        .select("id", count="exact")
+        .eq("uid", uid)
+        .gt("id", last_summarized_message_id)
+        .execute()
+    )
+    return resp.count or 0
 
 
 def get_turns_after(
-    conn: sqlite3.Connection,
-    session_id: str,
-    after_index: int,
+    client: Client,
+    uid: str,
+    after_id: int,
 ) -> List[TurnRow]:
-    """Return all turns where turn_index > after_index, ordered ascending.
-
-    Overlap-safe: the boundary is strictly greater than, so if the caller
-    passes `last_summarized_turn_index` it naturally includes any turn that
-    lands exactly at the boundary in the *next* window (never skips).
-    """
-    rows = conn.execute(
-        "SELECT turn_id, session_id, turn_index, role, text, timestamp "
-        "FROM turns "
-        "WHERE session_id = ? AND turn_index > ? "
-        "ORDER BY turn_index ASC",
-        (session_id, after_index),
-    ).fetchall()
-    return [
-        TurnRow(
-            turn_id=r["turn_id"],
-            session_id=r["session_id"],
-            turn_index=r["turn_index"],
-            role=r["role"],
-            text=r["text"],
-            timestamp=r["timestamp"],
-        )
-        for r in rows
-    ]
+    """Return all turns where id > after_id for uid, ordered by id ascending."""
+    resp = (
+        client.table("chat_history")
+        .select("id, uid, role, message, created_at")
+        .eq("uid", uid)
+        .gt("id", after_id)
+        .order("id", desc=False)
+        .execute()
+    )
+    return [_row_to_turn(r, idx + 1) for idx, r in enumerate(resp.data)]
 
 
-def get_last_n_turns(
-    conn: sqlite3.Connection,
-    session_id: str,
-    n: int,
-) -> List[TurnRow]:
-    """Return the most recent n turns for session_id, in ascending (chronological) order.
+def get_last_n_turns(client: Client, uid: str, n: int) -> List[TurnRow]:
+    """Return the most recent n turns for uid in ascending (chronological) order.
 
-    If the session has fewer than n turns, all available turns are returned.
-    If the session has no turns at all, an empty list is returned — never raises
-    IndexError or any other error due to an under-populated session.
-
-    Uses ORDER BY turn_index DESC LIMIT n to efficiently fetch only the tail
-    of the turns table, then reverses to restore ASC (chronological) order
-    suitable for display and prompt construction.
+    If the user has fewer than n turns, all available turns are returned.
     """
     if n <= 0:
         return []
-    rows = conn.execute(
-        "SELECT turn_id, session_id, turn_index, role, text, timestamp "
-        "FROM turns "
-        "WHERE session_id = ? "
-        "ORDER BY turn_index DESC "
-        "LIMIT ?",
-        (session_id, n),
-    ).fetchall()
-    # reversed() restores chronological ASC order without a second sort pass.
-    return [
-        TurnRow(
-            turn_id=r["turn_id"],
-            session_id=r["session_id"],
-            turn_index=r["turn_index"],
-            role=r["role"],
-            text=r["text"],
-            timestamp=r["timestamp"],
-        )
-        for r in reversed(rows)
-    ]
+    resp = (
+        client.table("chat_history")
+        .select("id, uid, role, message, created_at")
+        .eq("uid", uid)
+        .order("id", desc=True)
+        .limit(n)
+        .execute()
+    )
+    # Reverse to restore chronological ASC order.
+    rows = list(reversed(resp.data))
+    return [_row_to_turn(r, idx + 1) for idx, r in enumerate(rows)]
 
 
-def get_all_turns(
-    conn: sqlite3.Connection,
-    session_id: str,
-) -> List[TurnRow]:
-    """Return every turn for session_id in ascending (chronological) order.
+def get_all_turns(client: Client, uid: str) -> List[TurnRow]:
+    """Return every turn for uid in ascending (chronological) order.
 
-    Convenience wrapper around get_turns_after with after_index=0.
+    Convenience wrapper around get_turns_after with after_id=0.
     Used by the debug UI to display the full conversation history.
     """
-    return get_turns_after(conn, session_id, after_index=0)
+    return get_turns_after(client, uid, after_id=0)
 
 
-def get_all_session_ids(conn: sqlite3.Connection) -> List[str]:
-    """Return all distinct session_ids, ordered by most recently updated first.
+def get_all_uids(client: Client) -> List[str]:
+    """Return all distinct uids that have context_classifier rows.
 
-    Used by the debug UI to populate the session picker dropdown.
-    Returns an empty list if no sessions exist yet.
+    Used by the debug UI to populate the session/user picker dropdown.
     """
-    rows = conn.execute(
-        "SELECT session_id FROM sessions ORDER BY updated_at DESC"
-    ).fetchall()
-    return [r["session_id"] for r in rows]
+    resp = (
+        client.table("context_classifier")
+        .select("uid")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return [r["uid"] for r in resp.data]
 
 
 # ---------------------------------------------------------------------------
-# Summary writer
+# Summary writer  (maps to public.context_classifier)
 # ---------------------------------------------------------------------------
 
 def update_summary(
-    conn: sqlite3.Connection,
-    session_id: str,
+    client: Client,
+    uid: str,
     new_summary: str,
-    last_turn_index: int,
+    last_message_id: int,
 ) -> None:
-    """Atomically replace the session's summary and advance the turn pointer.
+    """Atomically replace the user's summary and advance the message pointer.
+
+    Uses upsert on uid (the UNIQUE constraint column) so it works whether
+    a row already exists or not.
 
     This is the ONLY place in the codebase that writes
-    last_summarized_turn_index.  All summarization paths funnel through here.
+    last_summarized_message_id.  All summarization paths funnel through here.
     """
-    with conn:
-        conn.execute(
-            "UPDATE sessions "
-            "SET current_summary = ?, "
-            "    last_summarized_turn_index = ?, "
-            "    updated_at = ? "
-            "WHERE session_id = ?",
-            (new_summary, last_turn_index, _utcnow(), session_id),
-        )
+    client.table("context_classifier").upsert(
+        {
+            "uid": uid,
+            "chat_summary": new_summary,
+            "last_summarized_message_id": last_message_id,
+        },
+        on_conflict="uid",
+    ).execute()
 
 
 # ---------------------------------------------------------------------------
 # Internal utilities
 # ---------------------------------------------------------------------------
 
-def _utcnow() -> str:
-    """Return current UTC time as an ISO-8601 string."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+def _row_to_turn(row: dict, turn_index: int) -> TurnRow:
+    """Convert a chat_history dict from Supabase into a TurnRow."""
+    return TurnRow(
+        turn_id=int(row["id"]),
+        uid=row["uid"],
+        role=row["role"],
+        text=row["message"],
+        timestamp=row.get("created_at", ""),
+        turn_index=turn_index,
+        session_id="",
+    )

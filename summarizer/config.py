@@ -39,24 +39,44 @@ class Config:
     )
     """Maximum tokens the model may emit per summary."""
 
-    # ------------------------------------------------------------------ #
-    # Database                                                             #
-    # ------------------------------------------------------------------ #
-    db_path: str = field(
-        default_factory=lambda: os.environ.get("SUMMARIZER_DB_PATH", "./summarizer.db")
+    n_gpu_layers: int = field(
+        default_factory=lambda: int(os.environ.get("SUMMARIZER_N_GPU_LAYERS", "-1"))
     )
-    """SQLite database file path."""
+    """Number of layers to offload to GPU VRAM (-1 for all layers, 0 for CPU only)."""
+
+    # ------------------------------------------------------------------ #
+    # Supabase                                                             #
+    # ------------------------------------------------------------------ #
+    supabase_url: str = field(
+        default_factory=lambda: os.environ.get("SUPABASE_URL", "")
+    )
+    """Supabase project URL (e.g. https://xyz.supabase.co).
+    Required — the service will fail at startup if absent."""
+
+    supabase_key: str = field(
+        default_factory=lambda: os.environ.get("SUPABASE_KEY", "")
+    )
+    """Supabase anon or service-role key.
+    Required — the service will fail at startup if absent."""
 
     # ------------------------------------------------------------------ #
     # Trigger                                                              #
     # ------------------------------------------------------------------ #
     periodic_threshold: int = field(
         default_factory=lambda: int(
-            os.environ.get("SUMMARIZER_PERIODIC_THRESHOLD", "15")
+            os.environ.get("SUMMARIZER_PERIODIC_THRESHOLD", "10")
         )
     )
-    """Number of new turns since last summary that triggers automatic
-    periodic summarization (Entry Point 1)."""
+    """Number of new messages (for a given uid) since last summary that triggers
+    automatic periodic summarization (Entry Point 1)."""
+
+    # ------------------------------------------------------------------ #
+    # Backward-compatibility shim                                          #
+    # ------------------------------------------------------------------ #
+    db_path: str = field(default_factory=lambda: "")
+    """Deprecated — kept as an empty-string shim so legacy callers that read
+    summarizer_cfg.db_path (e.g. classifier/service.py) don't raise
+    AttributeError.  The value is passed to open_connection() which ignores it."""
 
 
 # Module-level singleton — import this everywhere.
