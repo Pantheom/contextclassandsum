@@ -70,10 +70,11 @@ class _ModelSingleton:
 
         logger.info(
             "Loading classifier model from %s  "
-            "(n_ctx=%d, n_threads=%d, n_gpu_layers=0)",
+            "(n_ctx=%d, n_threads=%d, n_gpu_layers=%d)",
             model_path,
             cfg.n_ctx,
             cfg.n_threads,
+            cfg.n_gpu_layers,
         )
 
         # Import here so tests can patch before the import resolves.
@@ -83,7 +84,7 @@ class _ModelSingleton:
             model_path=model_path,
             n_ctx=cfg.n_ctx,
             n_threads=cfg.n_threads,
-            n_gpu_layers=0,     # CPU-only — predictable RAM alongside summarizer
+            n_gpu_layers=cfg.n_gpu_layers,
             verbose=False,
         )
         self._inference_lock = threading.Lock()
