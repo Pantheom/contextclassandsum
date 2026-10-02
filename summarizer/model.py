@@ -84,13 +84,47 @@ class _ModelSingleton:
         turns after finishing its summary.
         """
         with self._inference_lock:
-            output = self._llm(
-                prompt,
-                max_tokens=max_tokens,
-                stop=["<|end|>", "<|user|>", "<|system|>"],
-                echo=False,
-            )
+            try:
+                output = self._llm(
+                    prompt,
+                    max_tokens=max_tokens,
+                    stop=["<|end|>", "<|user|>", "<|system|>"],
+                    echo=False,
+                )
+            finally:
+                # Reset KV cache so one user's context never bleeds into the next call.
+                self._llm.reset()
+
         text: str = output["choices"][0]["text"]
+
+        # Debug: token usage tracking
+        usage = output.get("usage") or {}
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        total_tokens = usage.get("total_tokens")
+        if prompt_tokens is None and hasattr(self._llm, "tokenize"):
+            try:
+                prompt_tokens = len(self._llm.tokenize(prompt.encode("utf-8")))
+            except Exception:
+                prompt_tokens = 0
+        if completion_tokens is None and hasattr(self._llm, "tokenize"):
+            try:
+                completion_tokens = len(self._llm.tokenize(text.encode("utf-8")))
+            except Exception:
+                completion_tokens = 0
+        if total_tokens is None:
+            total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+        pct = (total_tokens / cfg.n_ctx * 100) if cfg.n_ctx else 0.0
+        logger.info(
+            "[DEBUG SUMMARIZER TOKENS] Prompt: %d | Completion: %d | Total: %d / %d (%.1f%%)",
+            prompt_tokens, completion_tokens, total_tokens, cfg.n_ctx, pct,
+        )
+        print(
+            f"\n>>> [DEBUG SUMMARIZER TOKENS] Prompt: {prompt_tokens} | Completion: {completion_tokens}"
+            f" | Total: {total_tokens} / {cfg.n_ctx} ({pct:.1f}%)\n",
+            flush=True,
+        )
+
         return text.strip()
 
     # ------------------------------------------------------------------

@@ -136,11 +136,22 @@ def regenerate_summary(uid: str, trigger: str = "on-demand") -> str:
     last_message_id = new_turns[-1].turn_id
 
     # ------------------------------------------------------------------ #
-    # 3. Build prompt and call model                                       #
+    # 3. Enforce per-turn character budget before building the prompt     #
+    # ------------------------------------------------------------------ #
+    # Cap each turn at 400 chars so 10 turns always fit within 4096 tokens.
+    import dataclasses
+
+    capped_turns = [
+        dataclasses.replace(t, text=t.text[:400]) if len(t.text) > 400 else t
+        for t in new_turns
+    ]
+
+    # ------------------------------------------------------------------ #
+    # 4. Build prompt and call model                                       #
     # ------------------------------------------------------------------ #
     prompt = build_prompt(
         previous_summary=previous_summary,
-        turns=new_turns,
+        turns=capped_turns,
         first_idx=first_idx,
         last_idx=last_idx,
     )
@@ -150,24 +161,36 @@ def regenerate_summary(uid: str, trigger: str = "on-demand") -> str:
         uid, first_idx, last_idx, trigger,
     )
 
-    new_summary = run_inference(prompt)
+    try:
+        new_summary = run_inference(prompt)
+    except Exception as exc:
+        # Inference crashed (e.g. OOM, context overflow). Advance the pointer
+        # so we never retry this same batch — prevents infinite retry spiral.
+        logger.error(
+            "Inference failed for uid=%s turns %d-%d: %s. "
+            "Advancing pointer to prevent retry loop.",
+            uid, first_idx, last_idx, exc,
+        )
+        update_summary(client, uid, previous_summary or "", last_message_id)
+        return previous_summary or ""
 
     # Guard against a degenerate empty response.
     if not new_summary:
         logger.warning(
             "Model returned an empty summary for uid=%s. "
-            "Retaining previous summary.",
+            "Advancing pointer to prevent retry loop.",
             uid,
         )
+        update_summary(client, uid, previous_summary or "", last_message_id)
         return previous_summary or ""
 
     # ------------------------------------------------------------------ #
-    # 4. Atomically persist — only write path for last_summarized_message_id
+    # 5. Atomically persist — only write path for last_summarized_message_id
     # ------------------------------------------------------------------ #
     update_summary(client, uid, new_summary, last_message_id)
 
     # ------------------------------------------------------------------ #
-    # 5. Structured log                                                    #
+    # 6. Structured log                                                    #
     # ------------------------------------------------------------------ #
     log_summarization_event(
         session_id=uid,

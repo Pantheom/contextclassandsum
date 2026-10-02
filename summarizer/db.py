@@ -190,14 +190,20 @@ def get_turns_after(
     client: Client,
     uid: str,
     after_id: int,
+    max_turns: int = 10,
 ) -> List[TurnRow]:
-    """Return all turns where id > after_id for uid, ordered by id ascending."""
+    """Return at most max_turns turns where id > after_id for uid, ordered ascending.
+
+    max_turns defaults to 10 — the rolling summarization window. Pass a larger
+    value (e.g. 10_000) only for debug/admin endpoints that need the full history.
+    """
     resp = (
         client.table("chat_history")
         .select("id, uid, role, message, created_at")
         .eq("uid", uid)
         .gt("id", after_id)
         .order("id", desc=False)
+        .limit(max_turns)
         .execute()
     )
     return [_row_to_turn(r, idx + 1) for idx, r in enumerate(resp.data)]
@@ -228,8 +234,9 @@ def get_all_turns(client: Client, uid: str) -> List[TurnRow]:
 
     Convenience wrapper around get_turns_after with after_id=0.
     Used by the debug UI to display the full conversation history.
+    Passes a large max_turns so the debug view is not capped at 10.
     """
-    return get_turns_after(client, uid, after_id=0)
+    return get_turns_after(client, uid, after_id=0, max_turns=10_000)
 
 
 def get_all_uids(client: Client) -> List[str]:

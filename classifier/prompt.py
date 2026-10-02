@@ -65,6 +65,11 @@ _NO_HISTORY_PLACEHOLDER = "(none — start of conversation)"
 def format_history(turns: List[TurnRow]) -> str:
     """Render turns as compact labelled dialogue lines for prompt inclusion.
 
+    Truncates each turn to a safe character budget so 6 history turns
+    never blow the classifier's 2048-token context window:
+        user turns      -> 150 chars max (~37 tokens)
+        assistant turns -> 80 chars max  (~20 tokens)
+
     Example:
         [U] What was the deadline?
         [A] The deadline is Friday.
@@ -72,10 +77,15 @@ def format_history(turns: List[TurnRow]) -> str:
     if not turns:
         return _NO_HISTORY_PLACEHOLDER
     role_label = {"user": "[U]", "assistant": "[A]"}
-    return "\n".join(
-        f"{role_label.get(t.role, '[?]')} {t.text}"
-        for t in turns
-    )
+    _CHAR_LIMIT = {"user": 150, "assistant": 80}
+
+    lines = []
+    for t in turns:
+        label = role_label.get(t.role, "[?]")
+        limit = _CHAR_LIMIT.get(t.role, 150)
+        text = t.text[:limit] if len(t.text) > limit else t.text
+        lines.append(f"{label} {text}")
+    return "\n".join(lines)
 
 
 def build_classifier_prompt(

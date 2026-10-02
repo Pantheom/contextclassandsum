@@ -30,7 +30,6 @@ from typing import Dict, List, Optional
 # ---------------------------------------------------------------------------
 # Summarizer imports — public API only.
 # ---------------------------------------------------------------------------
-from summarizer import summarize_on_demand          # patchable in tests
 from summarizer.db import (
     get_supabase_client,
     get_session,
@@ -143,15 +142,14 @@ def get_response_context(
         return {"needs_context": False, "context": None}
 
     # ------------------------------------------------------------------ #
-    # Context needed — fetch summary + recent turns                       #
+    # Context needed — read existing DB summary + recent turns            #
+    # The background periodic summarizer keeps the summary fresh.         #
+    # Reading it here adds 0ms latency vs triggering a model call.        #
     # ------------------------------------------------------------------ #
-
-    # summarize_on_demand is synchronous and may trigger the model.
-    # It updates last_summarized_message_id in the DB, which is intentional:
-    # we want the freshest possible summary before injecting context.
-    summary: str = summarize_on_demand(uid)
-
     client = get_supabase_client()
+    session = get_session(client, uid)
+    summary: str = (session.current_summary or "") if session else ""
+
     context_turns: List[TurnRow] = get_last_n_turns(client, uid, cfg.context_turns)
 
     context_block = _format_context_block(summary, context_turns)
